@@ -1,0 +1,180 @@
+name: biblioteca
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - datos-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  rabbit1:
+    image: rabbitmq:4.3-management
+    container_name: rabbit1
+    hostname: rabbit1
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_COOKIE}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - datos-rabbit:/var/lib/rabbitmq
+      - ./rabbitmq/cluster.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+      - ./rabbitmq/politicas.json:/etc/rabbitmq/politicas.json:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  rabbit2:
+    image: rabbitmq:4.3-management
+    container_name: rabbit2
+    hostname: rabbit2
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_COOKIE}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    volumes:
+      - datos-rabbit2:/var/lib/rabbitmq
+      - ./rabbitmq/cluster.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  eventos:
+    build: ../biblioteca-eventos
+    init: true
+    env_file: ../biblioteca-eventos/.env
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbit1:5672
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    ports:
+      - "3010:3010"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbit1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3010/salud').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  libros:
+    build: ../biblioteca-libros
+    init: true
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/libros').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  prestamos:
+    build: ../biblioteca-prestamos
+    init: true
+    env_file: ../biblioteca-prestamos/.env
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbit1:5672
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbit1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3002/prestamos').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  admin:
+    build: ../biblioteca-admin
+    init: true
+    env_file: ../biblioteca-admin/.env
+    environment:
+      RABBIT_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbit1:5672
+      RABBIT_ADMIN_URL: http://rabbit1:15672
+      RABBIT_USUARIO: ${RABBITMQ_USER}
+      RABBIT_CLAVE: ${RABBITMQ_PASSWORD}
+    ports:
+      - "3020:3020"
+    depends_on:
+      rabbit1:
+        condition: service_healthy
+    healthcheck:
+      # Todas las rutas del administrador exigen token: se comprueba que el puerto este abierto.
+      test: ["CMD", "node", "-e", "process.getBuiltinModule('node:net').connect(3020, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  bff:
+    build: ../biblioteca-bff
+    init: true
+    env_file: ../biblioteca-bff/.env
+    environment:
+      LIBROS_URL: http://libros:3001
+      PRESTAMOS_URL: http://prestamos:3002
+    ports:
+      - "3000:3000"
+
+  gateway:
+    build: ../biblioteca-gateway
+    init: true
+    env_file: ../biblioteca-gateway/.env
+    environment:
+      BFF_URL: http://bff:3000
+      LIBROS_URL: http://libros:3001
+      PRESTAMOS_URL: http://prestamos:3002
+    ports:
+      - "8080:8080"
+
+  web:
+    build: ../biblioteca-web
+    ports:
+      - "4200:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  datos-postgres:
+    name: datos-postgres
+  datos-rabbit:
+    name: datos-rabbit
+  datos-rabbit2:
+    name: datos-rabbit2
